@@ -7,6 +7,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,14 +18,10 @@ import androidx.compose.material.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role.Companion.Image
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
-import com.google.accompanist.permissions.PermissionRequired
-import com.google.accompanist.permissions.rememberPermissionState
+import com.google.accompanist.permissions.PermissionsRequired
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.seanproctor.ble.ui.theme.BLEExampleTheme
 
 class MainActivity : ComponentActivity() {
@@ -43,7 +40,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Column {
                         val reader = viewModel.fingerprintReader
-                        DeviceInfo(device = viewModel.connectedDevice)
+                        // DeviceInfo(device = viewModel.fingerprintReader?.)
 
                         FingerPrint(viewModel = viewModel)
 
@@ -99,19 +96,25 @@ fun DeviceInfo(device: BluetoothDevice?) {
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun ConnectButton(viewModel: BleViewModel) {
-    val permissionState =
-        rememberPermissionState(permission = Manifest.permission.ACCESS_FINE_LOCATION)
-    PermissionRequired(
-        permissionState = permissionState,
-        permissionNotGrantedContent = {
-            Text("Location permission is needed to use the scanner")
+    val permissionList = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        listOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_SCAN)
+    } else {
+        listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+    }
+    val permissionState = rememberMultiplePermissionsState(permissions = permissionList)
+    PermissionsRequired(
+        multiplePermissionsState = permissionState,
+        permissionsNotGrantedContent = {
+            Text("Permission is needed to use the scanner")
             Spacer(modifier = Modifier.height(8.dp))
-            Button(onClick = { permissionState.launchPermissionRequest() }) {
+            Button(onClick = { permissionState.launchMultiplePermissionRequest() }) {
                 Text("Request permission")
             }
         },
-        permissionNotAvailableContent = {
-            Text("Access fine location permission denied")
+        permissionsNotAvailableContent = {
+            Text("Bluetooth access permission denied")
         }
     ) {
         val isScanning = viewModel.isScanning
@@ -131,28 +134,25 @@ fun ConnectButton(viewModel: BleViewModel) {
 @OptIn(ExperimentalMaterialApi::class)
 @Composable
 fun ScanDialog(viewModel: BleViewModel) {
-    val context = LocalContext.current
-
     AlertDialog(
         modifier = Modifier
             .widthIn(min = 300.dp)
             .fillMaxHeight(),
         onDismissRequest = { viewModel.stopScanning() },
         text = {
-            val devices = viewModel.availableDevices
+            val advertisements = viewModel.advertisements
 
-            if (devices.isEmpty()) {
+            if (advertisements.isEmpty()) {
                 Text("No devices found")
             } else {
                 Column {
-                    devices.forEach { entry ->
-                        val device = entry.value
+                    advertisements.forEach { advertisement ->
                         ListItem(
                             modifier = Modifier.clickable {
-                                viewModel.connectDevice(context, device)
+                                viewModel.connectDevice(advertisement)
                             },
-                            text = { Text(device.name ?: "Unnamed device") },
-                            secondaryText = { Text(device.address ?: "") },
+                            text = { Text(advertisement.name ?: "Unnamed device") },
+                            secondaryText = { Text(advertisement.address) },
                         )
                     }
                 }

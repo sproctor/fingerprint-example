@@ -5,9 +5,18 @@ import android.bluetooth.*
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import com.juul.kable.Advertisement
+import com.juul.kable.Peripheral
+import com.juul.kable.notify
+import com.juul.kable.peripheral
 import com.secugen.fmssdk.*
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.*
 import kotlin.experimental.and
 
@@ -27,17 +36,17 @@ class WSQInfoClass {
 }
 
 @SuppressLint("MissingPermission")
-class FingerprintReader {
+class FingerprintReader(
+    private val scope: CoroutineScope,
+) {
 
     val TAG = "FingerprintReader"
 
-    private var gattConnection: BluetoothGatt? = null
+    private var peripheral: Peripheral? = null
 
     private var remainingSize = 0
     private var bytesRead = 0
     private val imgBuffer = ByteArray(FMSAPI.PACKET_HEADER_SIZE + FMSImage.IMG_SIZE_MAX + 1)
-
-    var listener: FingerprintListener? = null
 
     companion object {
         init {
@@ -51,154 +60,63 @@ class FingerprintReader {
         ): ByteArray
     }
 
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            val deviceAddress = gatt.device.address
+    suspend fun connect(advertisement: Advertisement) {
+        Log.d(TAG, "Connecting to device: ${advertisement.address} ==================")
+        val peripheral = scope.peripheral(advertisement) {
+            this.onServicesDiscovered {
+                requestMtu(REQUEST_MTU_SIZE)
+            }
+        }
+        this.peripheral = peripheral
+        peripheral.connect()
+        val services = peripheral.services ?: error("Services have not been discovered")
+        val descriptor = services
+            .first { it.serviceUuid == SERVICE_SECUGEN_SPP_OVER_BLE }
+            .characteristics
+            .first { it.characteristicUuid == CHARACTERISTIC_READ_NOTIFY }
+            .descriptors
+            .first { it.descriptorUuid == CLIENT_CHARACTERISTIC_NOTIFY_CONFIG }
+        Log.d(TAG, "Setting notification")
+        peripheral.write(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+    }
 
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    Log.d(TAG, "Successfully connected to $deviceAddress")
-                    gattConnection = gatt
-                    gatt.requestMtu(REQUEST_MTU_SIZE)
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    assert(gatt == gattConnection)
-                    Log.d(TAG, "Successfully disconnected from $deviceAddress")
-                    gatt.close()
-                    gattConnection = null
-                    listener?.disconnected()
+    suspend fun disconnectDevice() {
+        withTimeoutOrNull(5_000L) {
+            peripheral?.disconnect()
+        }
+    }
+
+    fun captureFingerprint(): Flow<FingerprintEvent> =
+        flow {
+            // Flush old data
+            remainingSize = 0
+            bytesRead = 0
+
+            Log.d(TAG, "Capturing fingerprint")
+            val peripheral = peripheral ?: error("No peripheral connected")
+            val services = peripheral.services ?: error("Services have not been discovered")
+            val service = services
+                .first { it.serviceUuid == SERVICE_SECUGEN_SPP_OVER_BLE }
+            val writeCharacteristic = service.characteristics
+                .first { it.characteristicUuid == CHARACTERISTIC_WRITE }
+            peripheral.write(writeCharacteristic, FMSAPI.cmdFPCapture(FMSAPI.IMAGE_SIZE_HALF))
+            val readCharacteristic = service.characteristics
+                .first { it.characteristicUuid == CHARACTERISTIC_READ_NOTIFY }
+            emit(FingerprintEvent.Progress(0))
+            while (true) {
+                val data = peripheral.read(readCharacteristic)
+                handleReadCharacteristic(data) {
+                    emit(it)
                 }
-            } else {
-                Log.w(TAG, "Error $status encountered for $deviceAddress! Disconnecting...")
-                gatt.close()
             }
         }
 
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "Increased MTU size: $mtu")
-                gatt.discoverServices()
-            } else {
-                Log.w(TAG, "Could not increase MTU size")
-                disconnectDevice()
-            }
-        }
-
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                with(gatt) {
-                    Log.d(TAG, "Discovered ${services.size} services for ${device.address}")
-                    listener?.connected(device)
-                }
-
-                val service = gatt.getService(SERVICE_SECUGEN_SPP_OVER_BLE)
-                if (service != null) {
-                    Log.d(TAG, "Custom gatt Service found")
-                    val characteristic = service.getCharacteristic(CHARACTERISTIC_READ_NOTIFY)
-                    if (characteristic.properties or BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) {
-                        Log.d(TAG, "Setting notification")
-                        gatt.setCharacteristicNotification(characteristic, true)
-                        val descriptor = characteristic.getDescriptor(
-                            CLIENT_CHARACTERISTIC_NOTIFY_CONFIG
-                        )
-                        descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        gatt.writeDescriptor(descriptor)
-                    }
-                }
-            } else {
-                Log.w(TAG, "onServicesDiscovered received: $status")
-            }
-        }
-
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            Log.d(TAG, "onCharacteristicRead status: $status")
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                handleCustomCharacheristic(characteristic)
-            }
-        }
-
-        override fun onCharacteristicWrite(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "Wrote successfully: ${characteristic.value.toHexString()}")
-            } else {
-                Log.w(TAG, "Write failed, retrying: ${characteristic.value.toHexString()}")
-                gatt.writeCharacteristic(characteristic)
-            }
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic
-        ) {
-            Log.d(TAG, "onCharacteristicChanged (UUID: ${characteristic.uuid})")
-            handleCustomCharacheristic(characteristic)
-        }
-    }
-
-    suspend fun connect(context: Context, device: BluetoothDevice) {
-        withContext(Dispatchers.Main) {
-            Log.d(TAG, "Connecting to device: ${device.address} ==================")
-            device.connectGatt(context, false, gattCallback)
-        }
-    }
-
-    fun disconnectDevice() {
-        gattConnection?.close()
-        gattConnection = null
-    }
-
-    suspend fun captureFingerprint() {
-        Log.d(TAG, "Capturing fingerprint")
-        withContext(Dispatchers.IO) {
-            writeCustomCharacteristic(FMSAPI.cmdFPCapture(FMSAPI.IMAGE_SIZE_HALF))
-        }
-    }
-
-    private fun writeCustomCharacteristic(value: ByteArray) {
-        val gatt = gattConnection ?: return
-        Log.d(TAG, "Writing custom characteristic: ${value.toHexString()}")
-        val service = gatt.getService(SERVICE_SECUGEN_SPP_OVER_BLE)
-        val writeCharacteristic = service.getCharacteristic(CHARACTERISTIC_WRITE)
-        writeCharacteristic.value = value
-        if (!gatt.writeCharacteristic(writeCharacteristic)) {
-            Log.w(TAG, "Failed to write characteristic")
-        }
-    }
-
-    private fun readCustomCharacteristic() {
-        val gatt = gattConnection ?: return
-
-        val service = gatt.getService(SERVICE_SECUGEN_SPP_OVER_BLE)
-        if (service == null) {
-            Log.w(TAG, "Custom BLE Service not found")
-            return
-        }
-
-        val readCharacteristic = service.getCharacteristic(CHARACTERISTIC_READ_NOTIFY)
-        if (!gatt.readCharacteristic(readCharacteristic)) {
-            Log.w(TAG, "Failed to read characteristic")
-        }
-    }
-
-    private fun handleCustomCharacheristic(characteristic: BluetoothGattCharacteristic) {
-        if (characteristic.uuid == CHARACTERISTIC_READ_NOTIFY) {
-            handleReadCharacteristic(characteristic.value)
-        } else {
-            handleWriteCharacteristic(characteristic.value)
-        }
-    }
-
-    private fun handleReadCharacteristic(data: ByteArray) {
+    private suspend fun handleReadCharacteristic(
+        data: ByteArray,
+        onEvent: suspend (FingerprintEvent) -> Unit
+    ) {
         if (data.size == FMSAPI.PACKET_HEADER_SIZE.toInt() && data[0] == 0x4E.toByte()) {
             Log.d(TAG, "Detected Notify message, try read data")
-            readCustomCharacteristic()
             return
         }
         if (data.isNotEmpty()) {
@@ -212,12 +130,10 @@ class FingerprintReader {
                 Log.d(TAG, "BytesRead: ${data.size}, RemainingSize: $remainingSize")
 
                 val progress: Int = bytesRead * 100 / (remainingSize + bytesRead)
-                listener?.progressed(progress)
+                onEvent(FingerprintEvent.Progress(progress))
 
-                if (remainingSize > 0) {
-                    readCustomCharacteristic()
-                } else {
-                    processBuffer()
+                if (remainingSize == 0) {
+                    processBuffer(onEvent)
                 }
             } else {
                 val stringBuilder = StringBuilder(data.size)
@@ -226,14 +142,15 @@ class FingerprintReader {
                 }
                 Log.d(TAG, "Received read notify: $stringBuilder")
 
-                handleRead(data)
+                handleRead(data, onEvent)
             }
-        } else {
-            Log.d(TAG, "characteristic.getValue length ${data.size}")
         }
     }
 
-    private fun handleRead(readResponseBuf: ByteArray) {
+    private suspend fun handleRead(
+        readResponseBuf: ByteArray,
+        onEvent: suspend (FingerprintEvent) -> Unit
+    ) {
         val rHeader = FMSHeader(readResponseBuf)
         var data: FMSData? = null
         if (!(rHeader.pkt_command == FMSAPI.CMD_FP_CAPTURE && rHeader.isFullSize)) // Not full size capture, full size image using file i/o
@@ -255,7 +172,7 @@ class FingerprintReader {
                         Log.d(TAG, "     bitrate: " + "15:1 (0.75)")
                         Log.d(TAG, "     wsq size: " + data.d_length)
                         val img = FMSImage(rtValue, myInfo.width * myInfo.height)
-                        listener?.capturedFingerprint(img.get())
+                        onEvent(FingerprintEvent.Captured(img.get()))
                     } else {
                         val img = if (rHeader.isFullSize) { // full size
                             val fmsimgsave = FMSImageSave()
@@ -269,7 +186,7 @@ class FingerprintReader {
                             "     width: " + img.getmWidth() + "   height: " + img.getmHeight()
                         )
                         Log.d(TAG, "     image size: " + img.getmWidth() * img.getmHeight())
-                        listener?.capturedFingerprint(img.get())
+                        onEvent(FingerprintEvent.Captured(img.get()))
                     }
                 }
                 else -> {
@@ -282,7 +199,7 @@ class FingerprintReader {
         }
     }
 
-    private fun processBuffer() {
+    private suspend fun processBuffer(onEvent: suspend (FingerprintEvent) -> Unit) {
         Log.d(TAG, "Processing buffer")
         val headerbuf = ByteArray(FMSAPI.PACKET_HEADER_SIZE.toInt())
         System.arraycopy(imgBuffer, 0, headerbuf, 0, FMSAPI.PACKET_HEADER_SIZE.toInt())
@@ -297,7 +214,7 @@ class FingerprintReader {
             // reset obtaining buffer size
             bytesRead = FMSAPI.PACKET_HEADER_SIZE.toInt()
         }
-        handleRead(imgBuffer)
+        handleRead(imgBuffer, onEvent)
     }
 
     private fun updateBytesRemaining(data: ByteArray) {
@@ -308,32 +225,17 @@ class FingerprintReader {
                     FMSAPI.PACKET_HEADER_SIZE + (header.pkt_datasize1.toInt() and 0x0000FFFF or (header.pkt_datasize2.toInt() shl 16 and -0x10000))
                 bytesRead = 0
 
-                listener?.progressed(0)
                 Log.d(TAG, "RemainingSize: $remainingSize")
                 Log.d(TAG, "data.size: ${data.size}")
             }
         }
     }
-
-    private fun handleWriteCharacteristic(data: ByteArray) {
-        // For all other profiles, writes the data formatted in HEX.
-        if (data.isNotEmpty()) {
-            val stringBuilder = java.lang.StringBuilder(data.size)
-            for (byteChar in data) {
-                stringBuilder.append(String.format("%02X ", byteChar))
-            }
-            Log.d(TAG, "Received write: $stringBuilder")
-            // Ignore extra data for now
-        }
-    }
 }
 
-interface FingerprintListener {
-    fun disconnected()
+sealed interface FingerprintEvent {
+    data class Progress(val percent: Int) : FingerprintEvent
 
-    fun connected(device: BluetoothDevice)
+    data class Captured(val image: Bitmap) : FingerprintEvent
 
-    fun capturedFingerprint(image: Bitmap)
-
-    fun progressed(progress: Int)
+    data class Error(val message: String?) : FingerprintEvent
 }

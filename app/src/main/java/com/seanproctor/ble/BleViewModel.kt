@@ -1,30 +1,29 @@
 package com.seanproctor.ble
 
 import android.annotation.SuppressLint
-import android.bluetooth.*
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanResult
+import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanSettings
-import android.content.Context
 import android.graphics.Bitmap
-import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.secugen.fmssdk.FMSAPI
-import kotlinx.coroutines.Dispatchers
+import com.juul.kable.Advertisement
+import com.juul.kable.ObsoleteKableApi
+import com.juul.kable.Scanner
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
-import java.util.*
 
 @SuppressLint("MissingPermission")
 class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
 
     private val TAG = "BleViewModel"
-
-    private val bluetoothAdapter = bluetoothManager.adapter
-    private val bleScanner = bluetoothAdapter.bluetoothLeScanner
 
     var isScanning by mutableStateOf(false)
         private set
@@ -32,79 +31,65 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
     var fingerprintReader by mutableStateOf<FingerprintReader?>(null)
         private set
 
-    var connectedDevice by mutableStateOf<BluetoothDevice?>(null)
-        private set
-
     var deviceState by mutableStateOf<DeviceState>(DeviceState.Unavailable)
         private set
 
-    var availableDevices by mutableStateOf<Map<String, BluetoothDevice>>(emptyMap())
+    var advertisements by mutableStateOf<List<Advertisement>>(emptyList())
         private set
 
     var fingerprintImage by mutableStateOf<Bitmap?>(null)
         private set
 
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            with(result.device) {
-                Log.i(TAG, "Found BLE device! Name: ${name ?: "Unnamed"}, address: $address")
-                availableDevices = availableDevices + (address to this)
-            }
-        }
+    @OptIn(ObsoleteKableApi::class)
+    private val scanner = Scanner {
+        scanSettings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
     }
+    private val scanScope = CoroutineScope(viewModelScope.coroutineContext + Job())
+    private val found = hashMapOf<String, Advertisement>()
 
     fun startScanning() {
         if (isScanning) return
 
         isScanning = true
 
-        val scanSettings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
-        availableDevices = emptyMap()
-
-        bleScanner.startScan(null, scanSettings, scanCallback)
+        scanScope.launch {
+            scanner
+                .advertisements
+                .catch { deviceState = DeviceState.Error(it.message ?: "Unknown error") }
+                .onCompletion { isScanning = false }
+                .filter { it.address.startsWith(SECUGEN_MAC_ADDRESS) }
+                .collect { advertisement ->
+                    found[advertisement.address] = advertisement
+                    advertisements = found.values.toList()
+                }
+        }
     }
 
     fun stopScanning() {
         if (isScanning) {
-            bleScanner.stopScan(scanCallback)
+            scanScope.cancel()
             isScanning = false
         }
     }
 
-    fun connectDevice(context: Context, device: BluetoothDevice) {
+    fun connectDevice(advertisement: Advertisement) {
         stopScanning()
-        val reader = FingerprintReader()
+        val reader = FingerprintReader(viewModelScope)
         fingerprintReader = reader
-        reader.listener = object : FingerprintListener {
-            override fun disconnected() {
-                fingerprintReader = null
-                connectedDevice = null
-                deviceState = DeviceState.Unavailable
-            }
-            override fun connected(device: BluetoothDevice) {
-                connectedDevice = device
-                deviceState = DeviceState.Waiting
-            }
-            override fun capturedFingerprint(image: Bitmap) {
-                fingerprintImage = image
-                deviceState = DeviceState.Waiting
-            }
-            override fun progressed(progress: Int) {
-                deviceState = DeviceState.Busy(progress)
-            }
-        }
         viewModelScope.launch {
-            reader.connect(context, device)
+            reader.connect(advertisement)
+            deviceState = DeviceState.Waiting
         }
     }
 
     fun disconnectDevice() {
-        fingerprintReader?.disconnectDevice()
-        fingerprintReader = null
-        deviceState = DeviceState.Unavailable
+        viewModelScope.launch {
+            fingerprintReader?.disconnectDevice()
+            fingerprintReader = null
+            deviceState = DeviceState.Unavailable
+        }
     }
 
     override fun onCleared() {
@@ -116,11 +101,24 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
         deviceState = DeviceState.Busy(0)
         viewModelScope.launch {
             fingerprintReader?.captureFingerprint()
+                ?.collect {
+                    when (it) {
+                        is FingerprintEvent.Progress -> deviceState = DeviceState.Busy(it.percent)
+                        is FingerprintEvent.Captured -> {
+                            fingerprintImage = it.image
+                            deviceState = DeviceState.Waiting
+                        }
+                        is FingerprintEvent.Error -> {
+
+                        }
+                    }
+                }
         }
     }
 }
 
 sealed interface DeviceState {
+    data class Error(val message: String) : DeviceState
     object Unavailable : DeviceState
     object Waiting : DeviceState
     data class Busy(val progress: Int) : DeviceState
