@@ -65,14 +65,21 @@ class MainActivity : ComponentActivity() {
 fun FingerPrint(viewModel: BleViewModel) {
     when (val deviceState = viewModel.deviceState) {
         is DeviceState.Waiting -> {
-            Button(onClick = { viewModel.capture() }) {
-                Text("Capture fingerprint")
+            Column {
+                if (deviceState.message != null) {
+                    Text(deviceState.message)
+                }
+                Button(onClick = { viewModel.capture() }) {
+                    Text("Capture fingerprint")
+                }
             }
         }
         is DeviceState.Busy -> {
             Text("Working: ${deviceState.progress}")
         }
-        else -> {}
+        else -> {
+            Text("no device available")
+        }
     }
     val fingerprint = viewModel.fingerprintImage
     if (fingerprint != null) {
@@ -85,14 +92,10 @@ fun FingerPrint(viewModel: BleViewModel) {
 
 @Composable
 fun DeviceInfo(device: BluetoothDevice?) {
-    val textToDisplay =
-        if (device != null) {
-            "Connected to ${device.name ?: device.address}"
-        } else {
-            "No device connected"
+    if (device != null) {
+        Card {
+            Text("Connected to ${device.name ?: device.address}")
         }
-    Card {
-        Text(textToDisplay)
     }
 }
 

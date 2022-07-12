@@ -32,6 +32,7 @@ class FingerprintReader {
     val TAG = "FingerprintReader"
 
     private var gattConnection: BluetoothGatt? = null
+    private var lastDevice: BluetoothDevice? = null
 
     private var remainingSize = 0
     private var bytesRead = 0
@@ -143,8 +144,17 @@ class FingerprintReader {
     }
 
     suspend fun connect(context: Context, device: BluetoothDevice) {
+        lastDevice = device
         withContext(Dispatchers.Main) {
-            Log.d(TAG, "Connecting to device: ${device.address} ==================")
+            Log.d(TAG, "Connecting to device: ${device.address}")
+            device.connectGatt(context, false, gattCallback)
+        }
+    }
+
+    suspend fun reconnect(context: Context) {
+        val device = lastDevice ?: return
+        withContext(Dispatchers.Main) {
+            Log.d(TAG, "Reconnecting to device: ${device.address}")
             device.connectGatt(context, false, gattCallback)
         }
     }
@@ -161,13 +171,23 @@ class FingerprintReader {
         }
     }
 
+    fun isConnected(): Boolean {
+        return gattConnection != null
+    }
+
     private fun writeCustomCharacteristic(value: ByteArray) {
         val gatt = gattConnection ?: return
         Log.d(TAG, "Writing custom characteristic: ${value.toHexString()}")
         val service = gatt.getService(SERVICE_SECUGEN_SPP_OVER_BLE)
+        if (service == null) {
+            Log.w(TAG, "Custom BLE Service not found")
+            listener?.error("Custom BLE Service not found")
+            return
+        }
         val writeCharacteristic = service.getCharacteristic(CHARACTERISTIC_WRITE)
         writeCharacteristic.value = value
         if (!gatt.writeCharacteristic(writeCharacteristic)) {
+            listener?.error("Failed to write characteristic")
             Log.w(TAG, "Failed to write characteristic")
         }
     }
@@ -178,12 +198,14 @@ class FingerprintReader {
         val service = gatt.getService(SERVICE_SECUGEN_SPP_OVER_BLE)
         if (service == null) {
             Log.w(TAG, "Custom BLE Service not found")
+            listener?.error("Custom BLE Service not found")
             return
         }
 
         val readCharacteristic = service.getCharacteristic(CHARACTERISTIC_READ_NOTIFY)
         if (!gatt.readCharacteristic(readCharacteristic)) {
             Log.w(TAG, "Failed to read characteristic")
+            listener?.error("Failed to read characteristic")
         }
     }
 
@@ -273,7 +295,12 @@ class FingerprintReader {
                     }
                 }
                 else -> {
-                    Log.w(TAG, "Error: [" + Integer.toHexString(rHeader.pkt_error.toInt()) + "]")
+                    val errorMessage = when (rHeader.pkt_error) {
+                        FMSAPI.ERR_TIME_OUT -> "Timed out"
+                        else -> "Unknown error (code: " + Integer.toHexString(rHeader.pkt_error.toInt()) + "]"
+                    }
+                    Log.d(TAG, "Error: $errorMessage")
+                    listener?.error(errorMessage)
                 }
             }
             else -> {
@@ -336,4 +363,6 @@ interface FingerprintListener {
     fun capturedFingerprint(image: Bitmap)
 
     fun progressed(progress: Int)
+
+    fun error(message: String)
 }

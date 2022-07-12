@@ -48,7 +48,9 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             with(result.device) {
                 Log.i(TAG, "Found BLE device! Name: ${name ?: "Unnamed"}, address: $address")
-                availableDevices = availableDevices + (address to this)
+                if (address.startsWith(SECUGEN_MAC_ADDRESS)) {
+                    availableDevices = availableDevices + (address to this)
+                }
             }
         }
     }
@@ -86,14 +88,18 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
             }
             override fun connected(device: BluetoothDevice) {
                 connectedDevice = device
-                deviceState = DeviceState.Waiting
+                deviceState = DeviceState.Waiting()
             }
             override fun capturedFingerprint(image: Bitmap) {
                 fingerprintImage = image
-                deviceState = DeviceState.Waiting
+                deviceState = DeviceState.Waiting()
             }
             override fun progressed(progress: Int) {
                 deviceState = DeviceState.Busy(progress)
+            }
+
+            override fun error(message: String) {
+                deviceState = DeviceState.Waiting(message)
             }
         }
         viewModelScope.launch {
@@ -122,6 +128,6 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
 
 sealed interface DeviceState {
     object Unavailable : DeviceState
-    object Waiting : DeviceState
+    data class Waiting(val message: String? = null) : DeviceState
     data class Busy(val progress: Int) : DeviceState
 }
