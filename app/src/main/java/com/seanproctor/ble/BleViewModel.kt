@@ -48,6 +48,7 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
     }
     private val scanScope = CoroutineScope(viewModelScope.coroutineContext + Job())
     private val found = hashMapOf<String, Advertisement>()
+    private var captureJob: Job? = null
 
     fun startScanning() {
         if (isScanning) return
@@ -99,7 +100,8 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
 
     fun capture() {
         deviceState = DeviceState.Busy(0)
-        viewModelScope.launch {
+        captureJob?.cancel()
+        captureJob = viewModelScope.launch {
             fingerprintReader?.captureFingerprint()
                 ?.collect {
                     when (it) {
@@ -114,6 +116,11 @@ class BleViewModel(bluetoothManager: BluetoothManager) : ViewModel() {
                     }
                 }
         }
+    }
+
+    fun cancel() {
+        captureJob?.cancel()
+        captureJob = null
     }
 }
 

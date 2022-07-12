@@ -46,10 +46,6 @@ class MainActivity : ComponentActivity() {
 
                         if (reader == null) {
                             ConnectButton(viewModel)
-                        } else {
-                            Button(onClick = { viewModel.disconnectDevice() }) {
-                                Text("Disconnect")
-                            }
                         }
                     }
                 }
@@ -65,9 +61,15 @@ fun FingerPrint(viewModel: BleViewModel) {
             Button(onClick = { viewModel.capture() }) {
                 Text("Capture fingerprint")
             }
+            Button(onClick = { viewModel.disconnectDevice() }) {
+                Text("Disconnect")
+            }
         }
         is DeviceState.Busy -> {
             Text("Working: ${deviceState.progress}")
+            Button(onClick = { /*TODO*/ }) {
+                Text("Cancel")
+            }
         }
         else -> {}
     }
