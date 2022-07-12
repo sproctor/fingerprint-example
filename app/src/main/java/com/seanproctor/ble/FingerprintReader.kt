@@ -1,24 +1,18 @@
 package com.seanproctor.ble
 
 import android.annotation.SuppressLint
-import android.bluetooth.*
-import android.content.Context
+import android.bluetooth.BluetoothGattDescriptor
 import android.graphics.Bitmap
 import android.util.Log
 import com.juul.kable.Advertisement
 import com.juul.kable.Peripheral
-import com.juul.kable.notify
 import com.juul.kable.peripheral
 import com.secugen.fmssdk.*
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.*
-import kotlin.experimental.and
 
 const val REQUEST_MTU_SIZE = 301
 val SERVICE_SECUGEN_SPP_OVER_BLE = UUID.fromString("0000fda0-0000-1000-8000-00805f9b34fb")!!
